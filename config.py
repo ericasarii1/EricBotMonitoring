@@ -1,82 +1,80 @@
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
 import asyncio
-import time
-import os
+import psutil
+from telegram import Bot
+from telegram.constants import ParseMode
+from telegram.ext import ApplicationBuilder
 
 # === KONFIGURASI ===
-BOT_NAME = os.getenv("BOT_NAME", "Bot Anime 1")  # Nama bot ini sendiri
-TOKEN = os.getenv("TOKEN")  # Token bot ini
-CHAT_ID_GRUP = int(os.getenv("GRUP_ID", "-100xxxxxxxxx"))  # Grup tujuan laporan
-MESSAGE_THREAD_ID = int(os.getenv("TOPIK_ID", "1234"))  # ID topik grup
+BOT_TOKEN = "YOUR_PANEL_BOT_TOKEN"
+GROUP_ID = -1001234567890
+TOPIC_ID = 1234
+CHECK_INTERVAL = 60
 
-# Daftar bot lain yang harus kirim heartbeat (termasuk bot ini sendiri)
-DAFTAR_BOT = [
-    "Bot Anime 1", "Bot Anime 2", "Bot Admin", "Bot Tools", "Bot Anime 3"
-]
+# Daftar proses bot (cek berdasarkan nama file atau keyword proses)
+bots_to_monitor = {
+    "Bot AntiSpam": "bot_antispam.py",
+    "Bot Monitor": "bot_monitor.py",
+    "Bot Log": "bot_log.py",
+}
 
-# Penyimpanan waktu terakhir heartbeat
-last_heartbeat = {}
+PANEL_MSG_ID = None
 
-# === Kirim heartbeat ke diri sendiri ===
-async def kirim_heartbeat(application: Application):
-    while True:
+# Cek proses berjalan berdasarkan nama file
+def is_process_running(keyword: str) -> bool:
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            await application.bot.send_message(
-                chat_id=application.bot.id,
-                text=f"HEARTBEAT::{BOT_NAME}::{int(time.time())}"
-            )
-        except Exception as e:
-            print("Gagal kirim heartbeat:", e)
-        await asyncio.sleep(60)  # Setiap 60 detik
+            if any(keyword in str(arg) for arg in proc.info['cmdline']):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False
 
-# === Terima heartbeat dari semua bot ===
-async def handle_heartbeat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        text = update.message.text
-        if text.startswith("HEARTBEAT::"):
-            _, nama_bot, timestamp = text.split("::")
-            last_heartbeat[nama_bot] = int(timestamp)
-    except Exception as e:
-        print("Gagal parsing heartbeat:", e)
+# Bangun teks panel
+def build_panel_text(statuses: dict) -> str:
+    lines = ["📊 <b>Status Uptime Bot</b>\n"]
+    for name, online in statuses.items():
+        emoji = "🟢" if online else "🔴"
+        status = "ONLINE" if online else "OFFLINE"
+        lines.append(f"{emoji} <b>{name}</b> - {status}")
+    return "\n".join(lines)
 
-# === Cek status bot-bot lain ===
-async def cek_status_bot(application: Application):
+# Loop update
+async def update_panel_loop(app):
+    global PANEL_MSG_ID
     while True:
-        now = int(time.time())
-        mati = []
-        for nama in DAFTAR_BOT:
-            last = last_heartbeat.get(nama, 0)
-            if now - last > 180:  # Lebih dari 3 menit dianggap mati
-                mati.append(nama)
+        statuses = {
+            name: is_process_running(keyword)
+            for name, keyword in bots_to_monitor.items()
+        }
+        panel_text = build_panel_text(statuses)
 
-        if mati:
-            msg = "❌ Bot yang kemungkinan *mati*:\n" + "\n".join(f"- {m}" for m in mati)
-            try:
-                await application.bot.send_message(
-                    chat_id=CHAT_ID_GRUP,
-                    message_thread_id=MESSAGE_THREAD_ID,
-                    text=msg,
-                    parse_mode="Markdown"
+        try:
+            if PANEL_MSG_ID:
+                await app.bot.edit_message_text(
+                    chat_id=GROUP_ID,
+                    message_id=PANEL_MSG_ID,
+                    message_thread_id=TOPIC_ID,
+                    text=panel_text,
+                    parse_mode=ParseMode.HTML
                 )
-            except Exception as e:
-                print("Gagal kirim laporan:", e)
+            else:
+                msg = await app.bot.send_message(
+                    chat_id=GROUP_ID,
+                    message_thread_id=TOPIC_ID,
+                    text=panel_text,
+                    parse_mode=ParseMode.HTML
+                )
+                PANEL_MSG_ID = msg.message_id
+        except Exception as e:
+            print("Gagal update panel:", e)
 
-        await asyncio.sleep(300)  # Cek setiap 5 menit
+        await asyncio.sleep(CHECK_INTERVAL)
 
-# === Fungsi utama ===
-def main():
-    print(f"[INFO] {BOT_NAME} mulai menjalankan monitoring...")
+# Start
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    asyncio.create_task(update_panel_loop(app))
+    await app.run_polling()
 
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT, handle_heartbeat))
-
-    # Jalankan task heartbeat dan pengecekan status bot
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(kirim_heartbeat(app)), interval=60, first=0)
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(cek_status_bot(app)), interval=300, first=60)
-
-    app.run_polling()
-
-# === Jalankan ===
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
